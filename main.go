@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,12 +26,122 @@ var (
 )
 
 func startServer() {
+	http.HandleFunc("/tasks", tasksHandler)
+	http.HandleFunc("/tasks/", taskHandler)
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		fmt.Println("Ошибка запуска сервера: ", err)
 	}
 	fmt.Println("Сервер запущен!")
 }
+
+func tasksHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getTasksHandler(w, r)
+	case http.MethodPost:
+		createTaskHandler(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func taskHandler(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/tasks/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+	}
+	switch r.Method {
+	case http.MethodGet:
+		getTaskHandler(w, r, id)
+	case http.MethodPut:
+		doneTaskHandler(w, r, id)
+	case http.MethodDelete:
+		deleteTaskHandler(w, r, id)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func sendJson(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func getTasksHandler(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	list := []Task{}
+	for _, task := range tasks {
+		list = append(list, task)
+	}
+	sendJson(w, list)
+}
+
+func createTaskHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Error parsing json", http.StatusBadRequest)
+		return
+	}
+	if req.Title == "" {
+		http.Error(w, "Title is required", http.StatusBadRequest)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	task := Task{
+		Id:        nextID,
+		Title:     req.Title,
+		Done:      false,
+		CreatedAt: time.Now(),
+	}
+	tasks[nextID] = task
+	nextID++
+	w.WriteHeader(http.StatusCreated)
+	sendJson(w, task)
+}
+
+func getTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
+	mu.Lock()
+	defer mu.Unlock()
+	task, ok := tasks[id]
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	sendJson(w, task)
+}
+
+func doneTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
+	mu.Lock()
+	defer mu.Unlock()
+	task, ok := tasks[id]
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	task.Done = true
+	tasks[id] = task
+	sendJson(w, task)
+}
+
+func deleteTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
+	mu.Lock()
+	defer mu.Unlock()
+	_, ok := tasks[id]
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	delete(tasks, id)
+	w.WriteHeader(http.StatusNoContent)
+	sendJson(w, tasks)
+}
+
+// CLI
 func addTask() {
 	title := os.Args[2]
 	jsonData := fmt.Sprintf(`{"title":"%s"}`, title)
