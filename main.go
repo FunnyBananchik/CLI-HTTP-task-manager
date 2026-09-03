@@ -1,14 +1,16 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type Task struct {
@@ -19,12 +21,36 @@ type Task struct {
 }
 
 var (
-	tasks   = make(map[int]Task)
-	nextID  = 1
 	baseURL = "http://localhost:8080"
-	mu      sync.Mutex
 )
 
+// Функции для БД
+
+var db *sql.DB
+
+func initDB() {
+	var err error
+	db, err = sql.Open("sqlite", "./tasks.db")
+	if err != nil {
+		fmt.Println("Ошибка при создании базы данных!")
+		return
+	}
+	query := `
+	CREATE TABLE IF NOT EXISTS tasks (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	title TEXT NOT NULL,
+	done INTEGER DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = db.Exec(query)
+	if err != nil {
+		fmt.Println("Ошибка при создании таблицы базы данных!", err)
+		return
+	}
+	fmt.Println("База данных подключена!")
+}
+
+// http сервер
 func startServer() {
 	http.HandleFunc("/tasks", tasksHandler)
 	http.HandleFunc("/tasks/", taskHandler)
@@ -70,10 +96,19 @@ func sendJson(w http.ResponseWriter, data interface{}) {
 }
 
 func getTasksHandler(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	defer mu.Unlock()
+	rows, err := db.Query("SELECT id, title, done, created_at FROM tasks ORDER BY id")
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
 	list := []Task{}
-	for _, task := range tasks {
+	for rows.Next() {
+		var task Task
+		err := rows.Scan(&task.Id, &task.Title, &task.Done, &task.CreatedAt)
+		if err != nil {
+			continue
+		}
 		list = append(list, task)
 	}
 	sendJson(w, list)
@@ -89,59 +124,67 @@ func createTaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Title == "" {
 		http.Error(w, "Title is required", http.StatusBadRequest)
+		return
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	task := Task{
-		Id:        nextID,
-		Title:     req.Title,
-		Done:      false,
-		CreatedAt: time.Now(),
+	res, err := db.Exec("INSERT INTO tasks (title, done) VALUES (?, 0)", req.Title)
+	if err != nil {
+		http.Error(w, "Failed to create task", http.StatusInternalServerError)
+		return
 	}
-	tasks[nextID] = task
-	nextID++
+	id, _ := res.LastInsertId()
+	var task Task
+	row := db.QueryRow("SELECT id, title, done, created_at FROM tasks WHERE id = ?", id)
+	row.Scan(&task.Id, &task.Title, &task.Done, &task.CreatedAt)
 	w.WriteHeader(http.StatusCreated)
 	sendJson(w, task)
 }
 
 func getTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
-	mu.Lock()
-	defer mu.Unlock()
-	task, ok := tasks[id]
-	if !ok {
+	var task Task
+	row := db.QueryRow("SELECT id, title, done, created_at FROM tasks WHERE id = ?", id)
+	err := row.Scan(&task.Id, &task.Title, &task.Done, &task.CreatedAt)
+	if err == sql.ErrNoRows {
 		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	sendJson(w, task)
 }
 
 func doneTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
-	mu.Lock()
-	defer mu.Unlock()
-	task, ok := tasks[id]
-	if !ok {
+	res, err := db.Exec("UPDATE tasks SET done = 1 WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	aff, _ := res.RowsAffected()
+	if aff == 0 {
 		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
-	task.Done = true
-	tasks[id] = task
+	var task Task
+	row := db.QueryRow("SELECT id, title, done, created_at FROM tasks WHERE id = ?", id)
+	row.Scan(&task.Id, &task.Title, &task.Done, &task.CreatedAt)
 	sendJson(w, task)
 }
 
 func deleteTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
-	mu.Lock()
-	defer mu.Unlock()
-	_, ok := tasks[id]
-	if !ok {
+	res, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	aff, _ := res.RowsAffected()
+	if aff == 0 {
 		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
-	delete(tasks, id)
 	w.WriteHeader(http.StatusNoContent)
-	sendJson(w, tasks)
 }
 
-// CLI
+// Клиентские функции
 func addTask() {
 	title := os.Args[2]
 	jsonData := fmt.Sprintf(`{"title":"%s"}`, title)
@@ -237,7 +280,10 @@ func deleteTask() {
 	fmt.Printf("Задача %s удалена!", idTask)
 }
 
+// Основная программа
+
 func main() {
+	initDB()
 	if len(os.Args) < 2 {
 		startServer()
 		return
