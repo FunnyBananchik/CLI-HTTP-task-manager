@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,17 +23,35 @@ type Task struct {
 
 var (
 	baseURL = "http://localhost:8080"
+	logger  *log.Logger
 )
+
+//Функция для логирования
+
+func loggingRequest(handler func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		begin := time.Now()
+		logger.Printf("[%s] %s", r.Method, r.URL.Path)
+		handler(w, r)
+		logger.Printf("Запрос обработан за %v", time.Since(begin))
+	}
+}
+
+func errorResponse(w http.ResponseWriter, mes string, status int) {
+	logger.Printf("[ERROR] %d %s", status, mes)
+	http.Error(w, mes, status)
+}
 
 // Функции для БД
 
 var db *sql.DB
 
 func initDB() {
+	logger.Println("[DB] Подключение базы данных!")
 	var err error
 	db, err = sql.Open("sqlite", "./tasks.db")
 	if err != nil {
-		fmt.Println("Ошибка при создании базы данных!")
+		logger.Println("[ERROR] Ошибка при создании базы данных!")
 		return
 	}
 	query := `
@@ -44,21 +63,21 @@ func initDB() {
 	);`
 	_, err = db.Exec(query)
 	if err != nil {
-		fmt.Println("Ошибка при создании таблицы базы данных!", err)
+		logger.Println("[ERROR] Ошибка при создании таблицы базы данных!", err)
 		return
 	}
-	fmt.Println("База данных подключена!")
+	logger.Println("[DB] База данных подключена!")
 }
 
 // http сервер
 func startServer() {
-	http.HandleFunc("/tasks", tasksHandler)
-	http.HandleFunc("/tasks/", taskHandler)
+	logger.Println("[SERVER] Запуск сервера")
+	http.HandleFunc("/tasks", loggingRequest(tasksHandler))
+	http.HandleFunc("/tasks/", loggingRequest(taskHandler))
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
-		fmt.Println("Ошибка запуска сервера: ", err)
+		logger.Println("[ERROR] Ошибка запуска сервера: ", err)
 	}
-	fmt.Println("Сервер запущен!")
 }
 
 func tasksHandler(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +87,7 @@ func tasksHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		createTaskHandler(w, r)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		errorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -76,7 +95,7 @@ func taskHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/tasks/"):]
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		errorResponse(w, "Invalid ID", http.StatusBadRequest)
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -86,7 +105,7 @@ func taskHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		deleteTaskHandler(w, r, id)
 	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		errorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -98,7 +117,7 @@ func sendJson(w http.ResponseWriter, data interface{}) {
 func getTasksHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, title, done, created_at FROM tasks ORDER BY id")
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		errorResponse(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -119,16 +138,16 @@ func createTaskHandler(w http.ResponseWriter, r *http.Request) {
 		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error parsing json", http.StatusBadRequest)
+		errorResponse(w, "Error parsing json", http.StatusBadRequest)
 		return
 	}
 	if req.Title == "" {
-		http.Error(w, "Title is required", http.StatusBadRequest)
+		errorResponse(w, "Title is required", http.StatusBadRequest)
 		return
 	}
 	res, err := db.Exec("INSERT INTO tasks (title, done) VALUES (?, 0)", req.Title)
 	if err != nil {
-		http.Error(w, "Failed to create task", http.StatusInternalServerError)
+		errorResponse(w, "Failed to create task", http.StatusInternalServerError)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -144,10 +163,10 @@ func getTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 	row := db.QueryRow("SELECT id, title, done, created_at FROM tasks WHERE id = ?", id)
 	err := row.Scan(&task.Id, &task.Title, &task.Done, &task.CreatedAt)
 	if err == sql.ErrNoRows {
-		http.Error(w, "Task not found", http.StatusNotFound)
+		errorResponse(w, "Task not found", http.StatusNotFound)
 		return
 	} else if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		errorResponse(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	sendJson(w, task)
@@ -156,12 +175,12 @@ func getTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 func doneTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 	res, err := db.Exec("UPDATE tasks SET done = 1 WHERE id = ?", id)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		errorResponse(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	aff, _ := res.RowsAffected()
 	if aff == 0 {
-		http.Error(w, "Task not found", http.StatusNotFound)
+		errorResponse(w, "Task not found", http.StatusNotFound)
 		return
 	}
 	var task Task
@@ -173,12 +192,12 @@ func doneTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 func deleteTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 	res, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		errorResponse(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	aff, _ := res.RowsAffected()
 	if aff == 0 {
-		http.Error(w, "Task not found", http.StatusNotFound)
+		errorResponse(w, "Task not found", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -187,25 +206,31 @@ func deleteTaskHandler(w http.ResponseWriter, r *http.Request, id int) {
 // Клиентские функции
 func addTask() {
 	title := os.Args[2]
+	logger.Println("[CLI] Запрос на добавление задачи")
 	jsonData := fmt.Sprintf(`{"title":"%s"}`, title)
 	resp, err := http.Post(baseURL+"/tasks", "application/json", strings.NewReader(jsonData))
 	if err != nil {
+		logger.Printf("[ERROR] Ошибка отправки запроса: %v", err)
 		fmt.Println("Ошибка отправки запроса на сервер!", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
+		logger.Printf("[ERROR] Ошибка добавления задачи: %v", err)
 		fmt.Println("Ошибка добавления задачи!", err)
 		return
 	}
 	var task Task
 	json.NewDecoder(resp.Body).Decode(&task)
-	fmt.Printf("Зачада добавлена! Номер = %d , текст \"%s\"", task.Id, task.Title)
+	logger.Printf("[CLI] Задача добавлена: Номер = %d , текст \"%s\"", task.Id, task.Title)
+	fmt.Printf("Задача добавлена! Номер = %d , текст \"%s\"", task.Id, task.Title)
 }
 
 func getAllTasks() {
+	logger.Println("[CLI] Запрос на вывод всех задач")
 	resp, err := http.Get(baseURL + "/tasks")
 	if err != nil {
+		logger.Printf("[ERROR] Ошибка отправки запроса: %v", err)
 		fmt.Println("Ошибка отправки запроса на сервер!", err)
 		return
 	}
@@ -213,6 +238,7 @@ func getAllTasks() {
 	var list []Task
 	json.NewDecoder(resp.Body).Decode(&list)
 	if len(list) == 0 {
+		logger.Println("[WARN] Нет задач")
 		fmt.Println("Нет задач!")
 		return
 	}
@@ -223,17 +249,21 @@ func getAllTasks() {
 		}
 		fmt.Printf("Номер задачи: %d,\t текст задачи: %s,\t статус выполнения: %s.\n", task.Id, task.Title, status)
 	}
+	logger.Println("[CLI] Запрос на вывод всех задач выполнен")
 }
 
 func getTask() {
 	idTask := os.Args[2]
+	logger.Printf("[CLI] Запрос на вывод задачи %s", idTask)
 	resp, err := http.Get(baseURL + "/tasks/" + idTask)
 	if err != nil {
+		logger.Printf("[ERROR] Ошибка отправки запроса: %v", err)
 		fmt.Println("Ошибка отправки запроса!", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		logger.Printf("[WARN] Задача с номером %s не найдена!", idTask)
 		fmt.Printf("Задача с номером %s не найдена!", idTask)
 		return
 	}
@@ -243,47 +273,62 @@ func getTask() {
 	if task.Done {
 		status = "выполнена"
 	}
+	logger.Printf("[CLI] Запрос на вывод задачи с номером %s выполнен", idTask)
 	fmt.Printf("Номер задачи: %d,\t текст задачи: %s,\t статус выполнения: %s.\n", task.Id, task.Title, status)
 }
 
 func doneTask() {
 	idTask := os.Args[2]
+	logger.Printf("[CLI] Запрос на изменение статуса задачи %s", idTask)
 	req, _ := http.NewRequest(http.MethodPut, baseURL+"/tasks/"+idTask, nil)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		logger.Printf("[ERROR] Ошибка отправки запроса: %v", err)
 		fmt.Println("Ошибка отправки запроса!", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		logger.Printf("[WARN] Задача с номером %s не найдена", idTask)
 		fmt.Printf("Задача с номером %s не найдена!", idTask)
 		return
 	}
+	logger.Printf("[CLI] Задача %s отмечена как выполненная", idTask)
 	fmt.Printf("Задача %s отмечена как выполненная!", idTask)
 }
 
 func deleteTask() {
 	idTask := os.Args[2]
+	logger.Printf("[CLI] Запрос на удаление задачи %s", idTask)
 	req, _ := http.NewRequest(http.MethodDelete, baseURL+"/tasks/"+idTask, nil)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		logger.Printf("[ERROR] Ошибка отправки запроса: %v", err)
 		fmt.Println("Ошибка отправки запроса!", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		logger.Printf("[WARN] Задача с номером %s не найдена", idTask)
 		fmt.Printf("Задача с номером %s не найдена!", idTask)
 		return
 	}
+	logger.Printf("[CLI] Задача %s удалена", idTask)
 	fmt.Printf("Задача %s удалена!", idTask)
 }
 
 // Основная программа
 
 func main() {
+	file, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logger = log.New(file, "[TaskManager]", log.LstdFlags)
 	initDB()
+	defer db.Close()
 	if len(os.Args) < 2 {
 		startServer()
 		return
@@ -292,6 +337,7 @@ func main() {
 	switch command {
 	case "add":
 		if len(os.Args) < 3 {
+			logger.Println("[TaskManager] Не указан текст задачи")
 			fmt.Println("Не указан текст задачи")
 			return
 		}
@@ -300,18 +346,21 @@ func main() {
 		getAllTasks()
 	case "get":
 		if len(os.Args) < 3 {
+			logger.Println("[TaskManager] Не указан номер задачи")
 			fmt.Println("Не указан номер задачи")
 			return
 		}
 		getTask()
 	case "done":
 		if len(os.Args) < 3 {
+			logger.Println("[TaskManager] Не указан номер задачи")
 			fmt.Println("Не указан номер задачи")
 			return
 		}
 		doneTask()
 	case "delete":
 		if len(os.Args) < 3 {
+			logger.Println("[TaskManager] Не указан номер задачи")
 			fmt.Println("Не указан номер задачи")
 			return
 		}
@@ -319,6 +368,7 @@ func main() {
 	case "server":
 		startServer()
 	default:
+		logger.Println("[TaskManager] Неизвестная команда")
 		fmt.Printf("Неизвестная команда!\nВот список команд:\n server - запуск сервера;\n add \"задача\" - добавление новой задачи;\n get <id> - открыть задачу по номеру;\n list - просмотреть все задачи;\n done <id>- отметить задачу как выполненную;\n delete <id> - удалить задачу по номеру\n")
 	}
 }
